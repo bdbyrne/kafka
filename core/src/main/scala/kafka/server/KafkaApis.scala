@@ -2273,6 +2273,10 @@ class KafkaApis(val requestChannel: RequestChannel,
           authorize(request, ALTER_CONFIGS, CLUSTER, CLUSTER_NAME)
         case ConfigResource.Type.TOPIC =>
           authorize(request, ALTER_CONFIGS, TOPIC, resource.name)
+        case ConfigResource.Type.CLIENT =>
+          // TODO: bbyrne
+        case ConfigResource.Type.USER =>
+          // TODO: bbyrne
         case rt => throw new InvalidRequestException(s"Unexpected resource type $rt")
       }
     }
@@ -2373,6 +2377,8 @@ class KafkaApis(val requestChannel: RequestChannel,
     val error = resource.`type` match {
       case ConfigResource.Type.BROKER | ConfigResource.Type.BROKER_LOGGER => Errors.CLUSTER_AUTHORIZATION_FAILED
       case ConfigResource.Type.TOPIC => Errors.TOPIC_AUTHORIZATION_FAILED
+      case ConfigResource.Type.CLIENT => // TODO: bbyrne
+      case ConfigResource.Type.USER => // TODO: bbyrne
       case rt => throw new InvalidRequestException(s"Unexpected resource type $rt for resource ${resource.name}")
     }
     new ApiError(error, null)
@@ -2393,6 +2399,10 @@ class KafkaApis(val requestChannel: RequestChannel,
           authorize(request, ALTER_CONFIGS, CLUSTER, CLUSTER_NAME)
         case ConfigResource.Type.TOPIC =>
           authorize(request, ALTER_CONFIGS, TOPIC, resource.name)
+        case ConfigResource.Type.CLIENT =>
+          // TODO: bbyrne
+        case ConfigResource.Type.USER =>
+          // TODO: bbyrne
         case rt => throw new InvalidRequestException(s"Unexpected resource type $rt")
       }
     }
@@ -2414,6 +2424,10 @@ class KafkaApis(val requestChannel: RequestChannel,
           authorize(request, DESCRIBE_CONFIGS, CLUSTER, CLUSTER_NAME)
         case ConfigResource.Type.TOPIC =>
           authorize(request, DESCRIBE_CONFIGS, TOPIC, resource.name)
+        case ConfigResource.Type.CLIENT =>
+          // TODO: bbyrne
+        case ConfigResource.Type.USER =>
+          // TODO: bbyrne
         case rt => throw new InvalidRequestException(s"Unexpected resource type $rt for resource ${resource.name}")
       }
     }

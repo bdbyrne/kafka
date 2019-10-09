@@ -361,6 +361,13 @@ class AdminManager(val config: KafkaConfig,
             else
               createResponseConfig(Log4jController.loggers,
                 (name, value) => new DescribeConfigsResponse.ConfigEntry(name, value.toString, ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG, false, false, List.empty.asJava))
+
+          case ConfigResource.Type.CLIENT =>
+            // TODO: bbyrne
+
+          case ConfigResource.Type.USER =>
+            // TODO: bbyrne
+
           case resourceType => throw new InvalidRequestException(s"Unsupported resource type: $resourceType")
         }
         resource -> resourceConfig
@@ -391,6 +398,8 @@ class AdminManager(val config: KafkaConfig,
         resource.`type` match {
           case ConfigResource.Type.TOPIC => alterTopicConfigs(resource, validateOnly, configProps, configEntriesMap)
           case ConfigResource.Type.BROKER => alterBrokerConfigs(resource, validateOnly, configProps, configEntriesMap)
+          case ConfigResource.Type.CLIENT => // TODO: bbyrne
+          case ConfigResource.Type.USER => // TODO: bbyrne
           case resourceType =>
             throw new InvalidRequestException(s"AlterConfigs is only supported for topics and brokers, but resource type is $resourceType")
         }
@@ -506,6 +515,13 @@ class AdminManager(val config: KafkaConfig,
             if (!validateOnly)
               alterLogLevelConfigs(alterConfigOps)
             resource -> ApiError.NONE
+
+          case ConfigResource.Type.CLIENT =>
+            // TODO: bbyrne
+
+          case ConfigResource.Type.USER =>
+            // TODO: bbyrne
+
           case resourceType =>
             throw new InvalidRequestException(s"AlterConfigs is only supported for topics and brokers, but resource type is $resourceType")
         }

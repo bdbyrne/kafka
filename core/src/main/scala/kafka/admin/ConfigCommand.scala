@@ -57,7 +57,7 @@ import scala.collection._
 object ConfigCommand extends Config {
 
   val BrokerLoggerConfigType = "broker-loggers"
-  val BrokerSupportedConfigTypes = Seq(ConfigType.Broker, BrokerLoggerConfigType)
+  val BrokerSupportedConfigTypes = Seq(ConfigType.Topic, ConfigType.Broker, BrokerLoggerConfigType)
   val DefaultScramIterations = 4096
   // Dynamic broker configs can only be updated using the new AdminClient once brokers have started
   // so that configs may be fully validated. Prior to starting brokers, updates may be performed using
@@ -298,9 +298,26 @@ object ConfigCommand extends Config {
     val configsToBeAdded = parseConfigsToBeAdded(opts).asScala.map { case (k, v) => (k, new ConfigEntry(k, v)) }
     val configsToBeDeleted = parseConfigsToBeDeleted(opts)
 
-    if (entityType == ConfigType.Broker) {
+    if (entityType == ConfigType.Topic) {
+      val configResource = new ConfigResource(ConfigResource.Type.TOPIC, entityName)
+      val oldConfig = topicConfig(adminClient, entityName, includeSynonyms = false, showAll = false)
+        .map { entry => (entry.name, entry) }.toMap
+
+      // fail the command if any of the configs to be deleted does not exist
+      val invalidConfigs = configsToBeDeleted.filterNot(oldConfig.contains)
+      if (invalidConfigs.nonEmpty)
+        throw new InvalidConfigurationException(s"Invalid config(s): ${invalidConfigs.mkString(",")}")
+
+      val alterOptions = new AlterConfigsOptions().timeoutMs(30000).validateOnly(false)
+      val alterEntries = (configsToBeAdded.values.map(new AlterConfigOp(_, AlterConfigOp.OpType.SET))
+        ++ configsToBeDeleted.map { k => new AlterConfigOp(new ConfigEntry(k, ""), AlterConfigOp.OpType.DELETE) }
+      ).asJavaCollection
+
+      adminClient.incrementalAlterConfigs(Map(configResource -> alterEntries).asJava, alterOptions).all().get(60, TimeUnit.SECONDS)
+
+    } else if (entityType == ConfigType.Broker) {
       val configResource = new ConfigResource(ConfigResource.Type.BROKER, entityName)
-      val oldConfig = brokerConfig(adminClient, entityName, includeSynonyms = false)
+      val oldConfig = brokerConfig(adminClient, entityName, includeSynonyms = false, showAll = false)
         .map { entry => (entry.name, entry) }.toMap
 
       // fail the command if any of the configs to be deleted does not exist
@@ -340,8 +357,11 @@ object ConfigCommand extends Config {
 
   private def describeBrokerConfig(adminClient: Admin, opts: ConfigCommandOptions,
                                    entityType: String, entityName: String): Unit = {
-    val configs = if (entityType == ConfigType.Broker)
-      brokerConfig(adminClient, entityName, includeSynonyms = true)
+    val showAll = opts.options.has(opts.showAllOpt)
+    val configs = if (entityType == ConfigType.Topic)
+      topicConfig(adminClient, entityName, includeSynonyms = true, showAll)
+    else if (entityType == ConfigType.Broker)
+      brokerConfig(adminClient, entityName, includeSynonyms = true, showAll)
     else // broker logger
       brokerLoggerConfigs(adminClient, entityName)
 
@@ -355,7 +375,7 @@ object ConfigCommand extends Config {
     }
   }
 
-  private def brokerConfig(adminClient: Admin, entityName: String, includeSynonyms: Boolean): Seq[ConfigEntry] = {
+  private def brokerConfig(adminClient: Admin, entityName: String, includeSynonyms: Boolean, showAll: Boolean): Seq[ConfigEntry] = {
     val configResource = new ConfigResource(ConfigResource.Type.BROKER, entityName)
     val configSource = if (!entityName.isEmpty)
       ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG
@@ -364,7 +384,16 @@ object ConfigCommand extends Config {
     val describeOpts = new DescribeConfigsOptions().includeSynonyms(includeSynonyms)
     val configs = adminClient.describeConfigs(Collections.singleton(configResource), describeOpts).all.get(30, TimeUnit.SECONDS)
     configs.get(configResource).entries.asScala
-      .filter(entry => entry.source == configSource)
+      .filter(entry => showAll || entry.source == configSource)
+      .toSeq
+  }
+
+  private def topicConfig(adminClient: Admin, entityName: String, includeSynonyms: Boolean, showAll: Boolean): Seq[ConfigEntry] = {
+    val configResource = new ConfigResource(ConfigResource.Type.TOPIC, entityName)
+    val describeOpts = new DescribeConfigsOptions().includeSynonyms(includeSynonyms)
+    val configs = adminClient.describeConfigs(Collections.singleton(configResource), describeOpts).all.get(30, TimeUnit.SECONDS)
+    configs.get(configResource).entries.asScala
+      .filter(entry => showAll || entry.source == ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG)
       .toSeq
   }
 
@@ -533,14 +562,13 @@ object ConfigCommand extends Config {
             .ofType(classOf[String])
             .withValuesSeparatedBy(',')
     val forceOpt = parser.accepts("force", "Suppress console prompts")
+    val showAllOpt = parser.accepts("show-all", "Whether to show all configuration entries, otherwise only modified entries are displayed.")
     options = parser.parse(args : _*)
-
-    val allOpts: Set[OptionSpec[_]] = Set(alterOpt, describeOpt, entityType, entityName, addConfig, deleteConfig, helpOpt)
 
     def checkArgs(): Unit = {
       // should have exactly one action
       val actions = Seq(alterOpt, describeOpt).count(options.has _)
-      if(actions != 1)
+      if (actions != 1)
         CommandLineUtils.printUsageAndDie(parser, "Command must include exactly one action: --describe, --alter")
       // check required args
       CommandLineUtils.checkInvalidArgs(parser, options, alterOpt, Set(describeOpt))
@@ -576,7 +604,7 @@ object ConfigCommand extends Config {
         }
       }
 
-      if (entityTypeVals.contains(ConfigType.Client) || entityTypeVals.contains(ConfigType.Topic) || entityTypeVals.contains(ConfigType.User))
+      if (entityTypeVals.contains(ConfigType.Client) || entityTypeVals.contains(ConfigType.User))
         CommandLineUtils.checkRequiredArgs(parser, options, zkConnectOpt, entityType)
 
       if (options.has(describeOpt) && entityTypeVals.contains(BrokerLoggerConfigType) && !options.has(entityName))
@@ -591,7 +619,7 @@ object ConfigCommand extends Config {
 
         val isAddConfigPresent: Boolean = options.has(addConfig)
         val isDeleteConfigPresent: Boolean = options.has(deleteConfig)
-        if(! isAddConfigPresent && ! isDeleteConfigPresent)
+        if (!isAddConfigPresent && !isDeleteConfigPresent)
           throw new IllegalArgumentException("At least one of --add-config or --delete-config must be specified with --alter")
       }
     }
