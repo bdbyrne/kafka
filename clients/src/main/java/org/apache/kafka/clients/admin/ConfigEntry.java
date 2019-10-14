@@ -194,7 +194,17 @@ public class ConfigEntry {
         DYNAMIC_DEFAULT_BROKER_CONFIG,  // dynamic broker config that is configured as default for all brokers in the cluster
         STATIC_BROKER_CONFIG,           // static broker config provided as broker properties at start up (e.g. server.properties file)
         DEFAULT_CONFIG,                 // built-in default configuration for configs that have a default value
-        UNKNOWN                         // source unknown e.g. in the ConfigEntry used for alter requests where source is not set
+        UNKNOWN,                        // source unknown e.g. in the ConfigEntry used for alter requests where source is not set
+
+        // Dynamic user/client configurations, in order of descending precedence.
+        DYNAMIC_USER_CLIENT_CONFIG,                  // /config/users/<user>/clients/<client-id>
+        DYNAMIC_USER_DEFAULT_CLIENT_CONFIG,          // /config/users/<user>/clients/<default>
+        DYNAMIC_USER_CONFIG,                         // /config/users/<user>
+        DYNAMIC_DEFAULT_USER_CLIENT_CONFIG,          // /config/users/<default>/clients/<client-id>
+        DYNAMIC_DEFAULT_USER_DEFAULT_CLIENT_CONFIG,  // /config/users/<default>/clients/<default>
+        DYNAMIC_DEFAULT_USER_CONFIG,                 // /config/users/<default>
+        DYNAMIC_CLIENT_CONFIG,                       // /config/clients/<client-id>
+        DYNAMIC_DEFAULT_CLIENT_CONFIG                // /config/clients/<default>
     }
 
     /**

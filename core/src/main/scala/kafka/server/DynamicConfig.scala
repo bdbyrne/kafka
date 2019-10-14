@@ -22,6 +22,7 @@ import java.util.Properties
 import kafka.log.LogConfig
 import kafka.security.CredentialProvider
 import org.apache.kafka.common.config.ConfigDef
+import org.apache.kafka.common.config.ConfigDef.ConfigKey
 import org.apache.kafka.common.config.ConfigDef.Importance._
 import org.apache.kafka.common.config.ConfigDef.Range._
 import org.apache.kafka.common.config.ConfigDef.Type._
@@ -91,6 +92,8 @@ object DynamicConfig {
 
     def names = clientConfigs.names
 
+    def configKeys = clientConfigs.configKeys.asScala
+
     def validate(props: Properties) = DynamicConfig.validate(clientConfigs, props, customPropsAllowed = false)
   }
 
@@ -103,6 +106,8 @@ object DynamicConfig {
       .define(Client.RequestPercentageOverrideProp, DOUBLE, Client.DefaultRequestOverride, MEDIUM, Client.RequestOverrideDoc)
 
     def names = userConfigs.names
+
+    def configKeys = userConfigs.configKeys.asScala
 
     def validate(props: Properties) = DynamicConfig.validate(userConfigs, props, customPropsAllowed = false)
   }

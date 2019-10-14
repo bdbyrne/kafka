@@ -23,6 +23,7 @@ import kafka.common.TopicAlreadyMarkedForDeletionException
 import kafka.log.LogConfig
 import kafka.utils.Log4jController
 import kafka.metrics.KafkaMetricsGroup
+import kafka.server.QuotaFactory.QuotaManagers
 import kafka.utils._
 import kafka.zk.{AdminZkClient, KafkaZkClient}
 import org.apache.kafka.clients.admin.AlterConfigOp
@@ -49,7 +50,8 @@ import scala.collection.JavaConverters._
 class AdminManager(val config: KafkaConfig,
                    val metrics: Metrics,
                    val metadataCache: MetadataCache,
-                   val zkClient: KafkaZkClient) extends Logging with KafkaMetricsGroup {
+                   val zkClient: KafkaZkClient,
+                   val quotaManagers: QuotaManagers) extends Logging with KafkaMetricsGroup {
 
   this.logIdent = "[Admin Manager on Broker " + config.brokerId + "]: "
 
@@ -384,6 +386,30 @@ class AdminManager(val config: KafkaConfig,
             else
               createResponseConfig(Log4jController.loggers,
                 (name, value) => new DescribeConfigsResponse.ConfigEntry(name, value.toString, ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG, false, false, List.empty.asJava))
+
+          case ConfigResource.Type.CLIENT =>
+            if (resource.name == null || resource.name.isEmpty)
+              throw new InvalidRequestException("Client id must not be empty")
+            quotaManagers.describeConfig("", resource.name, includeSynonyms)
+
+          case ConfigResource.Type.USER =>
+            if (resource.name == null || resource.name.isEmpty)
+              throw new InvalidRequestException("User must not be empty")
+            val entities = resource.name.split("/")
+            if (entities.length != 1 && entities.length != 3)
+              throw new IllegalArgumentException("Invalid user config path: " + resource.name)
+            val sanitizedUser = entities(0)
+            if (sanitizedUser.isEmpty)
+              throw new InvalidRequestException("User must not be empty")
+            val sanitizedClientId = if (entities.length != 3)
+              ""
+            else if (entities(2).isEmpty)
+              throw new InvalidRequestException("Client id must not be empty")
+            else
+              entities(2)
+            println(s"REQUEST: ${sanitizedUser} + ${sanitizedClientId}")
+            quotaManagers.describeConfig(sanitizedUser, sanitizedClientId, includeSynonyms)
+
           case resourceType => throw new InvalidRequestException(s"Unsupported resource type: $resourceType")
         }
         resource -> resourceConfig
@@ -411,12 +437,11 @@ class AdminManager(val config: KafkaConfig,
           configProps.setProperty(configEntry.name, configEntry.value)
         }
 
-        resource.`type` match {
-          case ConfigResource.Type.TOPIC => alterTopicConfigs(resource, validateOnly, configProps, configEntriesMap)
-          case ConfigResource.Type.BROKER => alterBrokerConfigs(resource, validateOnly, configProps, configEntriesMap)
-          case resourceType =>
-            throw new InvalidRequestException(s"AlterConfigs is only supported for topics and brokers, but resource type is $resourceType")
-        }
+        // Handle the broker specially.
+        if (resource.`type` == ConfigResource.Type.BROKER)
+          alterBrokerConfigs(resource, validateOnly, configProps, configEntriesMap)
+        else
+          alterDynamicConfigs(resource, validateOnly, configProps, configEntriesMap)
       } catch {
         case e @ (_: ConfigException | _: IllegalArgumentException) =>
           val message = s"Invalid config value for resource $resource: ${e.getMessage}"
@@ -434,14 +459,24 @@ class AdminManager(val config: KafkaConfig,
     }.toMap
   }
 
-  private def alterTopicConfigs(resource: ConfigResource, validateOnly: Boolean,
-                                configProps: Properties, configEntriesMap: Map[String, String]): (ConfigResource, ApiError) = {
-    val topic = resource.name
-    adminZkClient.validateTopicConfig(topic, configProps)
+  private def alterDynamicConfigs(resource: ConfigResource, validateOnly: Boolean,
+                                  configProps: Properties, configEntriesMap: Map[String, String]): (ConfigResource, ApiError) = {
+
+    val entityType = resource.`type` match {
+      case ConfigResource.Type.TOPIC => ConfigType.Topic
+      case ConfigResource.Type.BROKER => ConfigType.Broker
+      case ConfigResource.Type.CLIENT => ConfigType.Client
+      case ConfigResource.Type.USER => ConfigType.User
+      case ConfigResource.Type.BROKER | ConfigResource.Type.BROKER_LOGGER =>
+        throw new InvalidRequestException("Unhandled config resource type")
+      case ConfigResource.Type.UNKNOWN => throw new InvalidRequestException("Unknown config resource type")
+    }
+    val entityName = resource.name
+    adminZkClient.validateConfigs(entityType, entityName, configProps)
     validateConfigPolicy(resource, configEntriesMap)
     if (!validateOnly) {
-      info(s"Updating topic $topic with new configuration $config")
-      adminZkClient.changeTopicConfig(topic, configProps)
+      info(s"Updating $entityType $entityName with new configuration $config")
+      adminZkClient.changeConfigs(entityType, entityName, configProps)
     }
 
     resource -> ApiError.NONE
@@ -505,11 +540,21 @@ class AdminManager(val config: KafkaConfig,
 
         val configEntriesMap = alterConfigOps.map(entry => (entry.configEntry().name(), entry.configEntry().value())).toMap
 
+        def incrementalAlterDynamicConfig(configType: String, configKeys: Map[String, ConfigKey]): (ConfigResource, ApiError) = {
+          val configProps = adminZkClient.fetchEntityConfig(configType, resource.name)
+          prepareIncrementalConfigs(alterConfigOps, configProps, configKeys)
+          alterDynamicConfigs(resource, validateOnly, configProps, configEntriesMap)
+        }
+
         resource.`type` match {
           case ConfigResource.Type.TOPIC =>
-            val configProps = adminZkClient.fetchEntityConfig(ConfigType.Topic, resource.name)
-            prepareIncrementalConfigs(alterConfigOps, configProps, LogConfig.configKeys)
-            alterTopicConfigs(resource, validateOnly, configProps, configEntriesMap)
+            incrementalAlterDynamicConfig(ConfigType.Topic, LogConfig.configKeys)
+
+          case ConfigResource.Type.CLIENT =>
+            incrementalAlterDynamicConfig(ConfigType.Client, DynamicConfig.Client.configKeys)
+
+          case ConfigResource.Type.USER =>
+            incrementalAlterDynamicConfig(ConfigType.User, DynamicConfig.User.configKeys)
 
           case ConfigResource.Type.BROKER =>
             val brokerId = getBrokerId(resource)
@@ -529,6 +574,7 @@ class AdminManager(val config: KafkaConfig,
             if (!validateOnly)
               alterLogLevelConfigs(alterConfigOps)
             resource -> ApiError.NONE
+
           case resourceType =>
             throw new InvalidRequestException(s"AlterConfigs is only supported for topics and brokers, but resource type is $resourceType")
         }
@@ -583,7 +629,7 @@ class AdminManager(val config: KafkaConfig,
     def listType(configName: String, configKeys: Map[String, ConfigKey]): Boolean = {
       val configKey = configKeys(configName)
       if (configKey == null)
-        throw new InvalidConfigurationException(s"Unknown topic config name: $configName")
+        throw new InvalidConfigurationException(s"Unknown config name: $configName")
       configKey.`type` == ConfigDef.Type.LIST
     }
 

@@ -20,8 +20,13 @@ import kafka.server.QuotaType._
 import kafka.utils.Logging
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.metrics.Metrics
-import org.apache.kafka.server.quota.ClientQuotaCallback
-import org.apache.kafka.common.utils.Time
+import org.apache.kafka.common.requests.{ApiError, DescribeConfigsResponse}
+import org.apache.kafka.common.requests.DescribeConfigsResponse.ConfigSource
+import org.apache.kafka.common.security.auth.KafkaPrincipal
+import org.apache.kafka.common.utils.{Sanitizer, Time}
+import org.apache.kafka.server.quota.{ClientQuotaCallback, ClientQuotaType}
+
+import scala.collection.JavaConverters._
 
 object QuotaType  {
   case object Fetch extends QuotaType
@@ -48,6 +53,42 @@ object QuotaFactory extends Logging {
                            follower: ReplicationQuotaManager,
                            alterLogDirs: ReplicationQuotaManager,
                            clientQuotaCallback: Option[ClientQuotaCallback]) {
+
+    /**
+     * Describes the configurable quota properties for a (user, client ID) pair.
+     */
+    def describeConfig(sanitizedUser: String, sanitizedClientId: String, includeSynonyms: Boolean): DescribeConfigsResponse.Config = {
+      val principal = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, Sanitizer.desanitize(sanitizedUser))
+      val clientId = Sanitizer.desanitize(sanitizedClientId)
+
+      val entries = List(
+        (fetch, ClientQuotaType.FETCH, DynamicConfig.Client.ConsumerByteRateOverrideProp, KafkaConfig.ProducerQuotaBytesPerSecondDefaultProp),
+        (produce, ClientQuotaType.PRODUCE, DynamicConfig.Client.ProducerByteRateOverrideProp, KafkaConfig.ConsumerQuotaBytesPerSecondDefaultProp),
+        (request, ClientQuotaType.REQUEST, DynamicConfig.Client.RequestPercentageOverrideProp, "")
+      )
+      new DescribeConfigsResponse.Config(ApiError.NONE, entries.map {
+        case (manager, quotaType, property, defaultProperty) =>
+          val values = manager.quotaConfig(quotaType, principal, clientId)
+          if (values.isEmpty)
+            throw new IllegalStateException("Failed to resolve quota")
+          val synonyms = if (includeSynonyms)
+            values.drop(1).map {
+              case (ConfigSource.DEFAULT_CONFIG, quota) =>
+                val configSource = if (defaultProperty.isEmpty)
+                  ConfigSource.DEFAULT_CONFIG
+                else
+                  ConfigSource.STATIC_BROKER_CONFIG
+                new DescribeConfigsResponse.ConfigSynonym(defaultProperty, quota.toString, configSource)
+              case (configSource, quota) =>
+                new DescribeConfigsResponse.ConfigSynonym(property, quota.toString, configSource)
+            }
+            else List.empty
+          values.head match { case (configSource, quota) =>
+            new DescribeConfigsResponse.ConfigEntry(property, quota.toString, configSource, false, false, synonyms.asJava)
+          }
+      }.asJava)
+    }
+
     def shutdown(): Unit = {
       fetch.shutdown
       produce.shutdown
@@ -111,5 +152,4 @@ object QuotaFactory extends Logging {
       quotaWindowSizeSeconds = cfg.alterLogDirsReplicationQuotaWindowSizeSeconds
     )
   }
-
 }

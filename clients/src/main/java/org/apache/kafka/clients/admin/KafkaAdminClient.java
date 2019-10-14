@@ -1950,7 +1950,31 @@ public class KafkaAdminClient extends AdminClient {
             case DEFAULT_CONFIG:
                 configSource = ConfigEntry.ConfigSource.DEFAULT_CONFIG;
                 break;
-            default:
+          case DYNAMIC_USER_CLIENT_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_USER_CLIENT_CONFIG;
+                break;
+          case DYNAMIC_USER_DEFAULT_CLIENT_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_USER_DEFAULT_CLIENT_CONFIG;
+                break;
+          case DYNAMIC_USER_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_USER_CONFIG;
+                break;
+          case DYNAMIC_DEFAULT_USER_CLIENT_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_USER_CLIENT_CONFIG;
+                break;
+          case DYNAMIC_DEFAULT_USER_DEFAULT_CLIENT_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_USER_DEFAULT_CLIENT_CONFIG;
+                break;
+          case DYNAMIC_DEFAULT_USER_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_USER_CONFIG;
+                break;
+          case DYNAMIC_CLIENT_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_CLIENT_CONFIG;
+                break;
+          case DYNAMIC_DEFAULT_CLIENT_CONFIG:
+                configSource = ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_CLIENT_CONFIG;
+                break;
+          default:
                 throw new IllegalArgumentException("Unexpected config source " + source);
         }
         return configSource;

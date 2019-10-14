@@ -180,7 +180,15 @@ public class DescribeConfigsResponse extends AbstractResponse {
         DYNAMIC_DEFAULT_BROKER_CONFIG((byte) 3),
         STATIC_BROKER_CONFIG((byte) 4),
         DEFAULT_CONFIG((byte) 5),
-        DYNAMIC_BROKER_LOGGER_CONFIG((byte) 6);
+        DYNAMIC_BROKER_LOGGER_CONFIG((byte) 6),
+        DYNAMIC_USER_CLIENT_CONFIG((byte) 7),
+        DYNAMIC_USER_DEFAULT_CLIENT_CONFIG((byte) 8),
+        DYNAMIC_USER_CONFIG((byte) 9),
+        DYNAMIC_DEFAULT_USER_CLIENT_CONFIG((byte) 10),
+        DYNAMIC_DEFAULT_USER_DEFAULT_CLIENT_CONFIG((byte) 11),
+        DYNAMIC_DEFAULT_USER_CONFIG((byte) 12),
+        DYNAMIC_CLIENT_CONFIG((byte) 13),
+        DYNAMIC_DEFAULT_CLIENT_CONFIG((byte) 14);
 
         final byte id;
         private static final ConfigSource[] VALUES = values();
@@ -261,6 +269,12 @@ public class DescribeConfigsResponse extends AbstractResponse {
                                 break;
                             case TOPIC:
                                 configSource = ConfigSource.TOPIC_CONFIG;
+                                break;
+                            case CLIENT:
+                                configSource = ConfigSource.DYNAMIC_CLIENT_CONFIG;
+                                break;
+                            case USER:
+                                configSource = ConfigSource.DYNAMIC_USER_CONFIG;
                                 break;
                             default:
                                 configSource = ConfigSource.UNKNOWN_CONFIG;

@@ -267,13 +267,30 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
   }
 
   /**
-   * Change the configs for a given entityType and entityName
-   * @param entityType
-   * @param entityName
-   * @param configs
+   * Validate the configs for a given entityType and entityName.
+   *
+   * @param entityType the entity type
+   * @param entityName the entity name
+   * @param configs the config properties to validate
+   */
+  def validateConfigs(entityType: String, entityName: String, configs: Properties): Unit = {
+    entityType match {
+      case ConfigType.Topic => validateTopicConfig(entityName, configs)
+      case ConfigType.Client => validateClientIdConfig(configs)
+      case ConfigType.User => validateUserOrUserClientIdConfig(entityName, configs)
+      case ConfigType.Broker => validateBrokerConfig(configs)
+      case _ => throw new IllegalArgumentException(s"$entityType is not a known entityType. Should be one of ${ConfigType.Topic}, ${ConfigType.Client}, ${ConfigType.Broker}")
+    }
+  }
+
+  /**
+   * Change the configs for a given entityType and entityName.
+   *
+   * @param entityType the entity type
+   * @param entityName the entity name
+   * @param configs the config properties to change
    */
   def changeConfigs(entityType: String, entityName: String, configs: Properties): Unit = {
-
     entityType match {
       case ConfigType.Topic => changeTopicConfig(entityName, configs)
       case ConfigType.Client => changeClientIdConfig(entityName, configs)
@@ -284,47 +301,15 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
   }
 
   /**
-   * Update the config for a client and create a change notification so the change will propagate to other brokers.
-   * If clientId is <default>, default clientId config is updated. ClientId configs are used only if <user, clientId>
-   * and <user> configs are not specified.
+   * Validate the topic configs.
    *
-   * @param sanitizedClientId: The sanitized clientId for which configs are being changed
-   * @param configs: The final set of configs that will be applied to the topic. If any new configs need to be added or
-   *                 existing configs need to be deleted, it should be done prior to invoking this API
-   *
-   */
-  def changeClientIdConfig(sanitizedClientId: String, configs: Properties): Unit = {
-    DynamicConfig.Client.validate(configs)
-    changeEntityConfig(ConfigType.Client, sanitizedClientId, configs)
-  }
-
-  /**
-   * Update the config for a <user> or <user, clientId> and create a change notification so the change will propagate to other brokers.
-   * User and/or clientId components of the path may be <default>, indicating that the configuration is the default
-   * value to be applied if a more specific override is not configured.
-   *
-   * @param sanitizedEntityName: <sanitizedUserPrincipal> or <sanitizedUserPrincipal>/clients/<clientId>
-   * @param configs: The final set of configs that will be applied to the topic. If any new configs need to be added or
-   *                 existing configs need to be deleted, it should be done prior to invoking this API
-   *
-   */
-  def changeUserOrUserClientIdConfig(sanitizedEntityName: String, configs: Properties): Unit = {
-    if (sanitizedEntityName == ConfigEntityName.Default || sanitizedEntityName.contains("/clients"))
-      DynamicConfig.Client.validate(configs)
-    else
-      DynamicConfig.User.validate(configs)
-    changeEntityConfig(ConfigType.User, sanitizedEntityName, configs)
-  }
-
-  /**
-   * validates the topic configs
-   * @param topic
-   * @param configs
+   * @param topic the topic to validate
+   * @param configs the configs to validate
    */
   def validateTopicConfig(topic: String, configs: Properties): Unit = {
     Topic.validate(topic)
     if (!zkClient.topicExists(topic))
-      throw new AdminOperationException("Topic \"%s\" does not exist.".format(topic))
+      throw new AdminOperationException(s"Topic $topic does not exist.")
     // remove the topic overrides
     LogConfig.validate(configs)
   }
@@ -338,17 +323,69 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
    *
    */
    def changeTopicConfig(topic: String, configs: Properties): Unit = {
-    validateTopicConfig(topic, configs)
-    changeEntityConfig(ConfigType.Topic, topic, configs)
+     validateTopicConfig(topic, configs)
+     changeEntityConfig(ConfigType.Topic, topic, configs)
+   }
+
+  /**
+   * Validate the topic configs.
+   *
+   * @param configs the configs to validate
+   */
+  def validateClientIdConfig(configs: Properties): Unit = {
+    DynamicConfig.Client.validate(configs)
   }
 
   /**
-    * Override the broker config on some set of brokers. These overrides will be persisted between sessions, and will
-    * override any defaults entered in the broker's config files
-    *
-    * @param brokers: The list of brokers to apply config changes to
-    * @param configs: The config to change, as properties
-    */
+   * Update the config for a client and create a change notification so the change will propagate to other brokers.
+   * If clientId is <default>, default clientId config is updated. ClientId configs are used only if <user, clientId>
+   * and <user> configs are not specified.
+   *
+   * @param sanitizedClientId: The sanitized clientId for which configs are being changed
+   * @param configs: The final set of configs that will be applied to the topic. If any new configs need to be added or
+   *                 existing configs need to be deleted, it should be done prior to invoking this API
+   *
+   */
+  def changeClientIdConfig(sanitizedClientId: String, configs: Properties): Unit = {
+    validateClientIdConfig(configs)
+    changeEntityConfig(ConfigType.Client, sanitizedClientId, configs)
+  }
+
+  /**
+   * Validate the topic configs.
+   *
+   * @param topic the topic to validate
+   * @param configs the configs to validate
+   */
+  def validateUserOrUserClientIdConfig(sanitizedEntityName: String, configs: Properties): Unit = {
+    if (sanitizedEntityName == ConfigEntityName.Default || sanitizedEntityName.contains("/clients"))
+      validateClientIdConfig(configs)
+    else
+      DynamicConfig.User.validate(configs)
+  }
+
+  /**
+   * Update the config for a <user> or <user, clientId> and create a change notification so the change will propagate to other brokers.
+   * User and/or clientId components of the path may be <default>, indicating that the configuration is the default
+   * value to be applied if a more specific override is not configured.
+   *
+   * @param sanitizedEntityName: <sanitizedUserPrincipal> or <sanitizedUserPrincipal>/clients/<clientId>
+   * @param configs: The final set of configs that will be applied to the topic. If any new configs need to be added or
+   *                 existing configs need to be deleted, it should be done prior to invoking this API
+   *
+   */
+  def changeUserOrUserClientIdConfig(sanitizedEntityName: String, configs: Properties): Unit = {
+    validateUserOrUserClientIdConfig(sanitizedEntityName, configs)
+    changeEntityConfig(ConfigType.User, sanitizedEntityName, configs)
+  }
+
+  /**
+   * Override the broker config on some set of brokers. These overrides will be persisted between sessions, and will
+   * override any defaults entered in the broker's config files
+   *
+   * @param brokers: The list of brokers to apply config changes to
+   * @param configs: The config to change, as properties
+   */
   def changeBrokerConfig(brokers: Seq[Int], configs: Properties): Unit = {
     validateBrokerConfig(configs)
     brokers.foreach {
@@ -357,24 +394,24 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
   }
 
   /**
-    * Override a broker override or broker default config. These overrides will be persisted between sessions, and will
-    * override any defaults entered in the broker's config files
-    *
-    * @param broker: The broker to apply config changes to or None to update dynamic default configs
-    * @param configs: The config to change, as properties
-    */
-  def changeBrokerConfig(broker: Option[Int], configs: Properties): Unit = {
-    validateBrokerConfig(configs)
-    changeEntityConfig(ConfigType.Broker, broker.map(_.toString).getOrElse(ConfigEntityName.Default), configs)
+   * Validate dynamic broker configs. Since broker configs may contain custom configs, the validation
+   * only verifies that the provided config does not contain any static configs.
+   * @param configs configs to validate
+   */
+  def validateBrokerConfig(configs: Properties): Unit = {
+    DynamicConfig.Broker.validate(configs)
   }
 
   /**
-    * Validate dynamic broker configs. Since broker configs may contain custom configs, the validation
-    * only verifies that the provided config does not contain any static configs.
-    * @param configs configs to validate
-    */
-  def validateBrokerConfig(configs: Properties): Unit = {
-    DynamicConfig.Broker.validate(configs)
+   * Override a broker override or broker default config. These overrides will be persisted between sessions, and will
+   * override any defaults entered in the broker's config files
+   *
+   * @param broker: The broker to apply config changes to or None to update dynamic default configs
+   * @param configs: The config to change, as properties
+   */
+  def changeBrokerConfig(broker: Option[Int], configs: Properties): Unit = {
+    validateBrokerConfig(configs)
+    changeEntityConfig(ConfigType.Broker, broker.map(_.toString).getOrElse(ConfigEntityName.Default), configs)
   }
 
   private def changeEntityConfig(rootEntityType: String, fullSanitizedEntityName: String, configs: Properties): Unit = {
@@ -435,4 +472,3 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
   }
 
 }
-

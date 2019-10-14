@@ -28,11 +28,13 @@ import org.apache.kafka.common.{Cluster, MetricName}
 import org.apache.kafka.common.metrics._
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.metrics.stats.{Avg, CumulativeSum, Rate}
+import org.apache.kafka.common.requests.DescribeConfigsResponse.ConfigSource
 import org.apache.kafka.common.security.auth.KafkaPrincipal
 import org.apache.kafka.common.utils.{Sanitizer, Time}
 import org.apache.kafka.server.quota.{ClientQuotaCallback, ClientQuotaEntity, ClientQuotaType}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 /**
  * Represents the sensors aggregated per client
@@ -82,6 +84,20 @@ object ClientQuotaManager {
   val DefaultClientIdQuotaEntity = KafkaQuotaEntity(None, Some(DefaultClientIdEntity))
   val DefaultUserQuotaEntity = KafkaQuotaEntity(Some(DefaultUserEntity), None)
   val DefaultUserClientIdQuotaEntity = KafkaQuotaEntity(Some(DefaultUserEntity), Some(DefaultClientIdEntity))
+
+  // The precedence for apply quota configuration values from highest to lowest, where `Some(true)` is a valid (non-empty, non-default)
+  // entity name, `Some(false)` is the default entity name, and `None` is the empty entity name.
+  val QuotaPrecedence = List(
+    (Some(true), Some(true), ConfigSource.DYNAMIC_USER_CLIENT_CONFIG),                    // /config/users/<user>/clients/<client-id>
+    (Some(true), Some(false), ConfigSource.DYNAMIC_USER_DEFAULT_CLIENT_CONFIG),           // /config/users/<user>/clients/<default>
+    (Some(true), None, ConfigSource.DYNAMIC_USER_CONFIG),                                 // /config/users/<user>
+    (Some(false), Some(true), ConfigSource.DYNAMIC_DEFAULT_USER_CLIENT_CONFIG),           // /config/users/<default>/clients/<client-id>
+    (Some(false), Some(false), ConfigSource.DYNAMIC_DEFAULT_USER_DEFAULT_CLIENT_CONFIG),  // /config/users/<default>/clients/<default>
+    (Some(false), None, ConfigSource.DYNAMIC_DEFAULT_USER_CONFIG),                        // /config/users/<default>
+    (None, Some(true), ConfigSource.DYNAMIC_CLIENT_CONFIG),                               // /config/clients/<client-id>
+    (None, Some(false), ConfigSource.DYNAMIC_DEFAULT_CLIENT_CONFIG),                      // /config/clients/<default>
+    (None, None, ConfigSource.DEFAULT_CONFIG)                                             // static client-id quota
+  )
 
   case class UserEntity(sanitizedUser: String) extends ClientQuotaEntity.ConfigEntity {
     override def entityType: ClientQuotaEntity.ConfigEntityType = ClientQuotaEntity.ConfigEntityType.USER
@@ -454,9 +470,8 @@ class ClientQuotaManager(private val config: ClientQuotaManagerConfig,
   }
 
   /**
-   * Updates metrics configs. This is invoked when quota configs are updated in ZooKeeper
-   * or when partitions leaders change and custom callbacks that implement partition-based quotas
-   * have updated quotas.
+   * Updates metrics configs. This is invoked when quota configs are updated or when partitions leaders
+   * change and custom callbacks that implement partition-based quotas have updated quotas.
    * @param updatedQuotaEntity If set to one entity and quotas have only been enabled at one
    *    level, then an optimized update is performed with a single metric update. If None is provided,
    *    or if custom callbacks are used or if multi-level quotas have been enabled, all metric configs
@@ -523,6 +538,14 @@ class ClientQuotaManager(private val config: ClientQuotaManagerConfig,
       case QuotaType.Produce => ClientQuotaType.PRODUCE
       case QuotaType.Request => ClientQuotaType.REQUEST
       case _ => throw new IllegalArgumentException(s"Not a client quota type: $quotaType")
+    }
+  }
+
+  def quotaConfig(quotaType: ClientQuotaType, principal: KafkaPrincipal, clientId: String): Seq[(ConfigSource, Double)] = {
+    quotaCallback match {
+      case callback: DefaultQuotaCallback => callback.quotaConfig(principal, clientId)
+      case _ => Seq((ConfigSource.UNKNOWN_CONFIG,
+        quotaCallback.quotaLimit(quotaType, quotaCallback.quotaMetricTags(quotaType, principal, clientId))))
     }
   }
 
@@ -645,6 +668,69 @@ class ClientQuotaManager(private val config: ClientQuotaManagerConfig,
           metricTags
       }
       Map(DefaultTags.User -> userTag, DefaultTags.ClientId -> clientIdTag)
+    }
+
+    /**
+     * Maps a config source description (userOpt, clientIdOpt) to the corresponding quota entity for the
+     * provided (sanitizedUser, clientId) pair.
+     *
+     * For example, assume the config source for `ConfigSource.DYNAMIC_USER_DEFAULT_CLIENT_CONFIG` is provided,
+     * which is (Some(true), Some(false)). For the given user and client id ("user", "client"), the mapping
+     * would retain the user, but substitute the default client id, resulting in ("user", "<default>").
+     *
+     * Note that not all substitutions are valid. In the example above, if the user and client id had been
+     * ("<default>", "client"), then the config source's non-default, non-empty user could not be mapped. In these
+     * cases, `None` is returned.
+     */
+    private def mapQuotaEntity(userOpt: Option[Boolean], clientIdOpt: Option[Boolean],
+      sanitizedUser: String, clientId: String): Option[KafkaQuotaEntity] = {
+
+      (userOpt, clientIdOpt, sanitizedUser, clientId) match {
+        case (Some(true), _, ConfigEntityName.Default, _) => None
+        case (Some(_), _, "", _) => None
+        case (_, Some(true), _, ConfigEntityName.Default) => None
+        case (_, Some(_), _, "") => None
+        case _ =>
+          val userEntity = userOpt match {
+            case Some(true) => Some(UserEntity(sanitizedUser))
+            case Some(false) => Some(DefaultUserEntity)
+            case None => None
+          }
+          val clientIdEntity = clientIdOpt match {
+            case Some(true) => Some(ClientIdEntity(clientId))
+            case Some(false) => Some(DefaultClientIdEntity)
+            case None => None
+          }
+          Some(KafkaQuotaEntity(userEntity, clientIdEntity))
+      }
+    }
+
+    /**
+     * Returns a sequence of (config source, quota) pairs in order of precedence for the provided (principal, client id).
+     * The result will always include the default value at the tail of the list.
+     */
+    def quotaConfig(principal: KafkaPrincipal, clientId: String): Seq[(ConfigSource, Double)] = {
+      val sanitizedUser = Sanitizer.sanitize(principal.getName)
+      val entries = mutable.Buffer[(ConfigSource, Double)]()
+      var seen = false
+
+      QuotaPrecedence.foreach { case (userOpt, clientIdOpt, configSource) =>
+        val curQuotaEntity = mapQuotaEntity(userOpt, clientIdOpt, sanitizedUser, clientId)
+        val quota = curQuotaEntity match {
+          case Some(KafkaQuotaEntity(None, None)) => staticConfigClientIdQuota
+          case Some(kqe) =>
+            if (kqe.sanitizedUser == sanitizedUser && kqe.clientId == clientId)
+              seen = true
+            if (seen)
+              overriddenQuotas.get(kqe)
+            else
+              null
+          case None => null
+        }
+        if (quota != null)
+          entries += ((configSource, quota.bound))
+      }
+      entries.toList
     }
 
     override def close(): Unit = {}
