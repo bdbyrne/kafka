@@ -249,7 +249,7 @@ public class Metadata implements Closeable {
 
         String previousClusterId = cache.cluster().clusterResource().clusterId();
 
-        this.cache = handleMetadataResponse(response, topic -> retainTopic(topic.topic(), topic.isInternal(), now));
+        this.cache = handleMetadataResponse(response, now);
 
         Cluster cluster = cache.cluster();
         maybeSetMetadataError(cluster);
@@ -263,6 +263,10 @@ public class Metadata implements Closeable {
         clusterResourceListeners.onUpdate(cache.cluster().clusterResource());
 
         log.debug("Updated cluster metadata updateVersion {} to {}", this.updateVersion, this.cache);
+    }
+
+    public void topicMetadataUpdated(String topic, long nowMs) {
+        // Do nothing.
     }
 
     private void maybeSetMetadataError(Cluster cluster) {
@@ -288,14 +292,17 @@ public class Metadata implements Closeable {
     /**
      * Transform a MetadataResponse into a new MetadataCache instance.
      */
-    private MetadataCache handleMetadataResponse(MetadataResponse metadataResponse,
-                                                 Predicate<MetadataResponse.TopicMetadata> topicsToRetain) {
+    private MetadataCache handleMetadataResponse(MetadataResponse metadataResponse, long now) {
+        Set<String> topics = new HashSet<>();
         Set<String> internalTopics = new HashSet<>();
         List<MetadataCache.PartitionInfoAndEpoch> partitions = new ArrayList<>();
         for (MetadataResponse.TopicMetadata metadata : metadataResponse.topicMetadata()) {
-            if (!topicsToRetain.test(metadata))
+            topics.add(metadata.topic());
+
+            if (!retainTopic(metadata.topic(), metadata.isInternal(), now))
                 continue;
 
+            boolean success = true;
             if (metadata.error() == Errors.NONE) {
                 if (metadata.isInternal())
                     internalTopics.add(metadata.topic());
@@ -310,19 +317,25 @@ public class Metadata implements Closeable {
                     if (partitionMetadata.error().exception() instanceof InvalidMetadataException) {
                         log.debug("Requesting metadata update for partition {} due to error {}",
                                 new TopicPartition(metadata.topic(), partitionMetadata.partition()), partitionMetadata.error());
-                        requestUpdate();
+                        success = false;
                     }
                 }
             } else if (metadata.error().exception() instanceof InvalidMetadataException) {
                 log.debug("Requesting metadata update for topic {} due to error {}", metadata.topic(), metadata.error());
+                success = false;
+            }
+            if (success) {
+                topicMetadataUpdated(metadata.topic(), now);
+            } else {
                 requestUpdate();
             }
         }
 
-        return new MetadataCache(metadataResponse.clusterId(), new ArrayList<>(metadataResponse.brokers()), partitions,
+        return this.cache.mergeWith(metadataResponse.clusterId(), new ArrayList<>(metadataResponse.brokers()), partitions,
                 metadataResponse.topicsByError(Errors.TOPIC_AUTHORIZATION_FAILED),
                 metadataResponse.topicsByError(Errors.INVALID_TOPIC_EXCEPTION),
-                internalTopics, metadataResponse.controller());
+                internalTopics, metadataResponse.controller(),
+                (topic, isInternal) -> !topics.contains(topic) && retainTopic(topic, isInternal, now));
     }
 
     /**

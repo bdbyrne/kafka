@@ -26,11 +26,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiPredicate;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 /**
@@ -103,6 +106,44 @@ public class MetadataCache {
         } else {
             return clusterInstance;
         }
+    }
+
+    MetadataCache mergeWith(String newClusterId,
+                            List<Node> newNodes,
+                            Collection<PartitionInfoAndEpoch> addPartitions,
+                            Set<String> addUnauthorizedTopics,
+                            Set<String> addInvalidTopics,
+                            Set<String> addInternalTopics,
+                            Node newController,
+                            BiPredicate<String, Boolean> retainTopic) {
+
+        Predicate<String> shouldRetainTopic = topic -> retainTopic.test(topic, internalTopics.contains(topic));
+
+        ArrayList<PartitionInfoAndEpoch> newPartitions = new ArrayList<>(addPartitions.size());
+        newPartitions.addAll(addPartitions);
+        for (Map.Entry<TopicPartition, MetadataCache.PartitionInfoAndEpoch> entry : metadataByPartition.entrySet()) {
+            if (shouldRetainTopic.test(entry.getKey().topic())) {
+                newPartitions.add(entry.getValue());
+            }
+        }
+
+        Set<String> newUnauthorizedTopics = mergeSet(addUnauthorizedTopics, unauthorizedTopics, shouldRetainTopic);
+        Set<String> newInvalidTopics = mergeSet(addInvalidTopics, invalidTopics, shouldRetainTopic);
+        Set<String> newInternalTopics = mergeSet(addInternalTopics, internalTopics, shouldRetainTopic);
+
+        return new MetadataCache(clusterId, newNodes, newPartitions, newUnauthorizedTopics,
+                newInvalidTopics, newInternalTopics, newController);
+    }
+
+    private static <T> Set<T> mergeSet(Set<T> baseSet, Set<T> mergeSet, Predicate<T> predicate) {
+        Set<T> result = new HashSet<>(baseSet.size());
+        result.addAll(baseSet);
+        for (T element : mergeSet) {
+            if (predicate.test(element)) {
+                result.add(element);
+            }
+        }
+        return result;
     }
 
     private void computeClusterView() {

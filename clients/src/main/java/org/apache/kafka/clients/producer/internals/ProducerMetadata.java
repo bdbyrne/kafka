@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.producer.internals;
 
 import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.producer.internals.TopicInfo;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.requests.MetadataRequest;
@@ -27,18 +28,20 @@ import org.slf4j.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 public class ProducerMetadata extends Metadata {
-    private static final long TOPIC_EXPIRY_NEEDS_UPDATE = -1L;
     static final long TOPIC_EXPIRY_MS = 5 * 60 * 1000;
+    static final int TOPIC_REFRESH_TARGET_SIZE = 25;
 
-    /* Topics with expiry time */
-    private final Map<String, Long> topics = new HashMap<>();
+    private final Map<String, TopicInfo> topics = new HashMap<>();
     private final Logger log;
     private final Time time;
+    private final TopicInfo refreshRing = new TopicInfo();
 
     public ProducerMetadata(long refreshBackoffMs,
                             long metadataExpireMs,
@@ -50,16 +53,67 @@ public class ProducerMetadata extends Metadata {
         this.time = time;
     }
 
+    /**
+     * Returns whether a topic's metadata should be refreshed. If true, then an optional is
+     * returned indicating whether the refresh is urgent, otherwise if false, then a null
+     * optional is returned.
+     *
+     * @param topicInfo the topic info to refresh topic metadata for
+     * @param nowMs the approximate current time, in milliseconds
+     * @return an optional with whether the refresh is urgent, otherwise null if no refresh is needed
+     */
+    private Optional<Boolean> shouldRefresh(TopicInfo topicInfo, long nowMs) {
+        if (topicInfo.lastRefreshTime() == 0 ||
+            topicInfo.lastRefreshTime() + metadataExpireMs() <= nowMs) {
+            return Optional.of(true);
+        } else if (topicInfo.lastRefreshTime() + metadataExpireMs() / 2 <= nowMs) {
+            return Optional.of(false);
+        } else {
+            return Optional.<Boolean>empty();
+        }
+    }
+
     @Override
     public synchronized MetadataRequest.Builder newMetadataRequestBuilder() {
-        return new MetadataRequest.Builder(new ArrayList<>(topics.keySet()), true);
+        if ((true))
+            return new MetadataRequest.Builder(new ArrayList<>(topics.keySet()), true);
+
+        long nowMs = time.milliseconds();
+        List<String> refreshTopics = new ArrayList<>(Math.min(topics.size(), TOPIC_REFRESH_TARGET_SIZE));
+
+        // Add all topics whose metadata refresh is urgent, and non-urgent topics while the list is
+        // below the target refresh size.
+        TopicInfo topicInfo = refreshRing.refreshRingNext();
+        while (topicInfo != refreshRing) {
+            Optional<Boolean> refresh = shouldRefresh(topicInfo, nowMs);
+            if (!refresh.isPresent()) {
+                break;
+            }
+            if (!refresh.get() && refreshTopics.size() >= TOPIC_REFRESH_TARGET_SIZE) {
+                break;
+            }
+            refreshTopics.add(topicInfo.topic());
+            topicInfo = topicInfo.refreshRingNext();
+        }
+
+        return new MetadataRequest.Builder(refreshTopics, true);
+    }
+
+    private synchronized TopicInfo updateTopicInfo(String topic, TopicInfo topicInfo) {
+        if (topicInfo == null) {
+            topicInfo = new TopicInfo(topic);
+            topicInfo.refreshRingAddAfter(refreshRing);
+
+            requestUpdateForNewTopics();
+        }
+        topicInfo.updateLastAccessTime(time.milliseconds());
+        return topicInfo;
     }
 
     public synchronized void add(String topic) {
         Objects.requireNonNull(topic, "topic cannot be null");
-        if (topics.put(topic, TOPIC_EXPIRY_NEEDS_UPDATE) == null) {
-            requestUpdateForNewTopics();
-        }
+
+        topics.compute(topic, (k, v) -> updateTopicInfo(k, v));
     }
 
     // Visible for testing
@@ -73,19 +127,69 @@ public class ProducerMetadata extends Metadata {
 
     @Override
     public synchronized boolean retainTopic(String topic, boolean isInternal, long nowMs) {
-        Long expireMs = topics.get(topic);
-        if (expireMs == null) {
+        TopicInfo topicInfo = topics.get(topic);
+        if (topicInfo == null) {
             return false;
-        } else if (expireMs == TOPIC_EXPIRY_NEEDS_UPDATE) {
-            topics.put(topic, nowMs + TOPIC_EXPIRY_MS);
-            return true;
-        } else if (expireMs <= nowMs) {
-            log.debug("Removing unused topic {} from the metadata list, expiryMs {} now {}", topic, expireMs, nowMs);
-            topics.remove(topic);
-            return false;
-        } else {
+        }
+
+        long expireMs = topicInfo.lastAccessTime() + TOPIC_EXPIRY_MS;
+        if (expireMs > nowMs) {
             return true;
         }
+
+        log.debug("Removing unused topic {} from the metadata list, expireMs {}, now {}", topic, expireMs, nowMs);
+        topicInfo.refreshRingRemove();
+        topics.remove(topic);
+        return false;
+    }
+
+    @Override
+    public synchronized void topicMetadataUpdated(String topic, long nowMs) {
+        TopicInfo topicInfo = topics.get(topic);
+        if (topicInfo == null) {
+            return;
+        }
+
+        topicInfo.updateLastRefreshTime(nowMs);
+        topicInfo.refreshRingRemove();
+        topicInfo.refreshRingAddAfter(refreshRing.refreshRingPrev());
+    }
+
+    @Override
+    public synchronized long timeToNextUpdate(long nowMs) {
+        long nextUpdateMs = super.timeToNextUpdate(nowMs);
+        if (nextUpdateMs == 0) {
+            return 0;
+        }
+        if (topics.isEmpty()) {
+            return nextUpdateMs;
+        }
+
+        // If the front topic is urgent, then a next update should be issued immediately.
+        Optional<Boolean> refresh = shouldRefresh(refreshRing.refreshRingNext(), nowMs);
+        if (refresh.orElse(false)) {
+            return 0;
+        }
+
+        // Determine whether there's enough non-urgent topics that need to be refreshed to
+        // warrant performing an update.
+        if (topics.size() >= TOPIC_REFRESH_TARGET_SIZE) {
+            int ready = 0;
+            TopicInfo topicInfo = refreshRing.refreshRingNext();
+            while (topicInfo != refreshRing) {
+                refresh = shouldRefresh(topicInfo, nowMs);
+                if (!refresh.isPresent()) {
+                    break;
+                }
+                ++ready;
+                if (ready >= TOPIC_REFRESH_TARGET_SIZE) {
+                    return 0;
+                }
+                topicInfo = topicInfo.refreshRingNext();
+            }
+        }
+
+        return Math.min(nextUpdateMs, nowMs - refreshRing.refreshRingNext().lastRefreshTime() - metadataExpireMs());
     }
 
     /**
@@ -125,5 +229,4 @@ public class ProducerMetadata extends Metadata {
         super.close();
         notifyAll();
     }
-
 }

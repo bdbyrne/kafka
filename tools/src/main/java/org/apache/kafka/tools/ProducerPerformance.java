@@ -53,6 +53,7 @@ public class ProducerPerformance {
 
             /* parse args */
             String topicName = res.getString("topic");
+            Integer numTopics = res.getInt("numTopics");
             long numRecords = res.getLong("numRecords");
             Integer recordSize = res.getInt("recordSize");
             int throughput = res.getInt("throughput");
@@ -122,6 +123,14 @@ public class ProducerPerformance {
             Stats stats = new Stats(numRecords, 5000);
             long startMs = System.currentTimeMillis();
 
+            List<String> topicNames = null;
+            if (numTopics != null) {
+              topicNames = new ArrayList<String>(numTopics);
+              for (int i = 0; i < numTopics; ++i) {
+                topicNames.add(topicName + "-" + ((Integer) i).toString());
+              }
+            }
+
             ThroughputThrottler throttler = new ThroughputThrottler(throughput, startMs);
 
             int currentTransactionSize = 0;
@@ -132,11 +141,17 @@ public class ProducerPerformance {
                     transactionStartTime = System.currentTimeMillis();
                 }
 
+                String topic;
+                if (topicNames != null) {
+                  topic = topicNames.get(random.nextInt(topicNames.size()));
+                } else {
+                  topic = topicName;
+                }
 
                 if (payloadFilePath != null) {
                     payload = payloadByteList.get(random.nextInt(payloadByteList.size()));
                 }
-                record = new ProducerRecord<>(topicName, payload);
+                record = new ProducerRecord<>(topic, payload);
 
                 long sendStartMs = System.currentTimeMillis();
                 Callback cb = stats.nextCompletion(sendStartMs, payload.length, stats);
@@ -204,6 +219,14 @@ public class ProducerPerformance {
                 .type(String.class)
                 .metavar("TOPIC")
                 .help("produce messages to this topic");
+
+        parser.addArgument("--num-topics")
+                .action(store())
+                .required(true)
+                .type(Integer.class)
+                .metavar("NUM-TOPICS")
+                .dest("numTopics")
+                .help("number of topics to produce to");
 
         parser.addArgument("--num-records")
                 .action(store())
