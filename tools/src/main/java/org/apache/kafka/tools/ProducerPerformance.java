@@ -53,6 +53,7 @@ public class ProducerPerformance {
 
             /* parse args */
             String topicName = res.getString("topic");
+            Integer numTopics = res.getInt("numTopics");
             long numRecords = res.getLong("numRecords");
             Integer recordSize = res.getInt("recordSize");
             int throughput = res.getInt("throughput");
@@ -76,7 +77,7 @@ public class ProducerPerformance {
                 Path path = Paths.get(payloadFilePath);
                 System.out.println("Reading payloads from: " + path.toAbsolutePath());
                 if (Files.notExists(path) || Files.size(path) == 0)  {
-                    throw new  IllegalArgumentException("File does not exist or empty file provided.");
+                    throw new IllegalArgumentException("File does not exist or empty file provided.");
                 }
 
                 String[] payloadList = new String(Files.readAllBytes(path), "UTF-8").split(payloadDelimiter);
@@ -86,6 +87,18 @@ public class ProducerPerformance {
                 for (String payload : payloadList) {
                     payloadByteList.add(payload.getBytes(StandardCharsets.UTF_8));
                 }
+            }
+
+            String topicNames[];
+            if (numTopics == null) {
+                topicNames = new String[]{topicName};
+            } else if (numTopics >= 1) {
+                topicNames = new String[numTopics];
+                for (int i = 0; i < numTopics; ++i) {
+                    topicNames[i] = topicName + Integer.toString(i);
+                }
+            } else {
+                throw new IllegalArgumentException("Number of topics must be >= 1");
             }
 
             Properties props = new Properties();
@@ -132,11 +145,11 @@ public class ProducerPerformance {
                     transactionStartTime = System.currentTimeMillis();
                 }
 
-
+                String topic = topicNames[topicNames.length > 1 ? random.nextInt(topicNames.length) : 0];
                 if (payloadFilePath != null) {
                     payload = payloadByteList.get(random.nextInt(payloadByteList.size()));
                 }
-                record = new ProducerRecord<>(topicName, payload);
+                record = new ProducerRecord<>(topic, payload);
 
                 long sendStartMs = System.currentTimeMillis();
                 Callback cb = stats.nextCompletion(sendStartMs, payload.length, stats);
@@ -204,6 +217,15 @@ public class ProducerPerformance {
                 .type(String.class)
                 .metavar("TOPIC")
                 .help("produce messages to this topic");
+
+        parser.addArgument("--num-topics")
+                .action(store())
+                .required(false)
+                .type(Integer.class)
+                .metavar("NUM-TOPICS")
+                .dest("numTopics")
+                .help("number of topics to produce to. The generated topic names will use the --topic name with a value [0, --num-topics) " +
+                        "appended, and will be selected at random for a producer record.");
 
         parser.addArgument("--num-records")
                 .action(store())
